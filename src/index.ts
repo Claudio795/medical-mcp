@@ -38,6 +38,21 @@ import {
 } from "./utils.js";
 import { cacheManager } from "./cache/manager.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+import express from "express";
+import cors from "cors";
+
+
+logSafetyWarnings();
+
+// get arguments
+function getArgValue(prefix: string): string | undefined {
+  const arg = process.argv.find(a => a.startsWith(prefix));
+  if (!arg) return undefined;
+  const [, value] = arg.split("=", 2);
+  return value;
+}
 
 const server = new McpServer({
   name: "medical-mcp",
@@ -47,8 +62,6 @@ const server = new McpServer({
     tools: {},
   },
 });
-
-logSafetyWarnings();
 
 // MCP Tools
 server.tool(
@@ -461,10 +474,54 @@ server.tool(
   },
 );
 
-async function main() {
+// stdio server
+async function runStdio(server: McpServer) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.log("✅ Medical MCP Server running on stdio");
+  // su stdio, meglio stderr (stdout può interferire con il protocollo)
+  console.error("✅ Medical MCP Server running on stdio");
+}
+
+// streamable-http server
+async function runHttp(server: McpServer) {
+  const app = express();
+  app.use(express.json({ limit: "2mb" }));
+  app.use(cors());
+  app.options("/mcp", cors());
+
+  const host = process.env.HOST ?? "0.0.0.0";
+  const port = Number(getArgValue("--port") ?? process.env.PORT ?? 3000);
+  
+  
+  app.all("/mcp", async (req: any, res: any) => {
+    
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      await server.connect(transport);
+    
+    res.on("close", async () => {
+        try { await transport.close(); } catch {}
+        try { await server.close(); } catch {}
+      });
+
+      await transport.handleRequest(req, res, req.body);
+
+  });
+
+  app.listen(port, host, () => {
+    console.log(`✅ Medical MCP Server (HTTP) on http://${host}:${port}/mcp`);
+  })
+}
+
+// main
+async function main() {
+  //const server = new McpServer({ name: "medical-mcp", version: "1.0.0" });
+
+  const useHttp = process.argv.includes("--http");
+  if (useHttp) return runHttp(server);
+  return runStdio(server);
+  
 }
 
 main().catch((error) => {
